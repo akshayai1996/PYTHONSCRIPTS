@@ -12,9 +12,10 @@
     5. Handles added, updated, or deleted rows
     6. Prevents duplicate folder creation
     7. Logs all actions in folder_action_log.txt
+    8. ADDED PROGRESS TRACKING using tqdm
  Author:          Akshay Solanki
  Created On:      19-Oct-2025
- Dependencies:    pandas, openpyxl, tkinter, os, shutil, datetime
+ Dependencies:    pandas, openpyxl, tkinter, os, shutil, datetime, tqdm
 ===============================================================================
 """
 
@@ -26,6 +27,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
+from tqdm import tqdm
 
 def log(msg: str, log_file):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -113,7 +115,8 @@ def highlight_missing_iso(excel_file, log_file):
         col_idx = header.index("ISO Status") + 1
         for row in range(2, ws.max_row + 1):
             cell = ws.cell(row=row, column=col_idx)
-            fill = red_fill if str(cell.value).strip().upper() == "MISSING" else clear_fill
+            status_val = str(cell.value).strip().upper() if cell.value else ""
+            fill = red_fill if status_val == "MISSING" else clear_fill
             for c in range(1, ws.max_column + 1):
                 ws.cell(row=row, column=c).fill = fill
         
@@ -133,6 +136,7 @@ def sync_folders_and_copy(excel_file, server_path, dest_root, log_file):
 
     processed_folders = {}
     
+    log("--- Starting Folder Structure Sync (Phase 1/2) ---", log_file)
     for idx, row in df.iterrows():
         desired = row["folder name"].strip()
         history = row["history folder name"].strip()
@@ -183,7 +187,8 @@ def sync_folders_and_copy(excel_file, server_path, dest_root, log_file):
         except Exception as e:
             log(f"ERROR row {idx}: {e}", log_file)
 
-    for idx, row in df.iterrows():
+    log("--- Starting ISO Copy Phase (Phase 2/2) ---", log_file)
+    for idx, row in tqdm(df.iterrows(), total=len(df), desc="Copying ISOs", ncols=80):
         iso_no = row["Iso no"].strip()
         folder = row["folder name"].strip()
         dest_folder = os.path.join(dest_root, folder)
@@ -194,22 +199,23 @@ def sync_folders_and_copy(excel_file, server_path, dest_root, log_file):
         src_iso = find_iso_on_server(iso_no, server_path)
         
         if not src_iso:
-            log(f"MISSING ISO: {iso_no} (row {idx})", log_file)
             os.makedirs(dest_folder, exist_ok=True)
             with open(os.path.join(dest_folder, "ISO_NOT_FOUND.txt"), "w") as f:
                 f.write(f"ISO {iso_no} not found.\n")
             df.at[idx, "ISO Status"] = "MISSING"
+            log(f"MISSING ISO: {iso_no} (row {idx})", log_file)
             continue
         
         dest_iso = os.path.join(dest_folder, os.path.basename(src_iso))
         try:
             safe_copy(src_iso, dest_iso)
-            log(f"COPIED: {iso_no} -> {folder}", log_file)
             df.at[idx, "ISO Status"] = "OK"
+            log(f"COPIED: {iso_no} -> {folder}", log_file)
         except Exception as e:
             log(f"ERROR copying {iso_no}: {e}", log_file)
             df.at[idx, "ISO Status"] = "MISSING"
 
+    log("--- Starting Destination Cleanup ---", log_file)
     try:
         existing = set(os.listdir(dest_root))
         excel_folders = set(df["folder name"].tolist())
@@ -248,7 +254,7 @@ def main():
     if not dest_root:
         log("Destination cancelled.", log_file)
         return
-    if not messagebox.askyesno("Confirm", "Proceed with sync?"):
+    if not messagebox.askyesno("Confirm", "Proceed with sync? This may take time."):
         log("Cancelled by user.", log_file)
         return
     
