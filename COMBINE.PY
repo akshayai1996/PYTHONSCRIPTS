@@ -1,110 +1,106 @@
 """
-==============================================================================
+===============================================================================
  Project Name:   PDF Automation Tools
  File Name:      combine.py
- Description:    Combines all PDF files in the current working directory into
-                 a single PDF file named after the folder itself. Allows
-                 merging either alphabetically or in filesystem order.
+ Description:    Combines all PDF files in the current folder into a single PDF,
+                 filename is fixed as folder name. Duplicate file/page checking
+                 is optional. Skipped PDFs are logged in 'skippedpdf.txt' in
+                 the same folder.
 
  Author:         Akshay Solanki
- Created on:     19-Oct-2025
- Version:        1.2.0
- License:        Unlicense (Public Domain - Free to use without attribution)
-
- Dependencies:   fitz (PyMuPDF)
- Python Version: 3.8+
-
- Usage:
-     python combine.py
-
- Options:
-     MERGE_ALPHABETICALLY = True  → Merge files in alphabetical order (A → Z)
-     MERGE_ALPHABETICALLY = False → Merge files in folder order (as listed by OS)
-
- Customization Guide:
-     - Place this script inside the folder containing your PDF files.
-     - Open a terminal or command prompt in that folder.
-     - Run: python combine.py
-     - To change output name, edit: output_filename = f"{folder_name}.pdf"
-==============================================================================
+ Version:        1.7.0
+ Dependencies:   fitz (PyMuPDF), hashlib, os
+===============================================================================
 """
 
-# ==============================
-# Import Required Libraries
-# ==============================
 import fitz
 import os
-import sys
+import hashlib
 
 # ==============================
 # USER CONFIGURATION
 # ==============================
-# Choose whether to merge PDFs alphabetically (A → Z) or in folder order
-MERGE_ALPHABETICALLY = True  # Set False for folder order merge
+MERGE_ALPHABETICALLY = True      # True: Alphabetical order, False: folder order
+SKIP_DUPLICATE_FILE_NAMES = True # True: skip files with duplicate names
+SKIP_DUPLICATE_PAGES = True      # True: skip duplicate pages based on content hash
 
-def combine_pdfs_in_current_folder():
-    """
-    Combines all PDF files in the current working directory into one output file,
-    with optional alphabetical or folder-order merging.
-    """
+def page_hash(page):
+    """Compute SHA256 hash of page text"""
+    return hashlib.sha256(page.get_text("rawdict").__repr__().encode('utf-8')).hexdigest()
 
-    # Step 1: Identify the current working directory and folder name
+def combine_pdfs():
     current_dir = os.getcwd()
     folder_name = os.path.basename(current_dir)
+    output_filename = f"{folder_name}.pdf"  # Fixed output file name
+    skipped_log = os.path.join(current_dir, "skippedpdf.txt")  # Skipped PDFs log
 
-    # Step 2: Define the output file name
-    output_filename = f"{folder_name}.pdf"
+    # Clear previous skipped log
+    open(skipped_log, 'w').close()
 
-    # Step 3: Create an empty PDF to store all combined pages
     combined_pdf = fitz.open()
 
-    # Step 4: Get a list of all PDF files in the folder
-    pdf_files = [
-        f for f in os.listdir(current_dir)
-        if f.lower().endswith(".pdf")
-        and not f.startswith(".")
-        and f != output_filename
-    ]
+    # List all PDFs in folder, excluding the output file itself
+    pdf_files = [f for f in os.listdir(current_dir)
+                 if f.lower().endswith(".pdf") and not f.startswith(".") and f != output_filename]
 
-    # Step 5: Handle the case when no PDFs are found
     if not pdf_files:
-        print("⚠️ No PDF files found in this directory. Please place some .pdf files here.")
-        combined_pdf.close()
+        print("⚠️ No PDF files found in this directory.")
         return
 
-    # Step 6: Sort files if user chose alphabetical merge
     if MERGE_ALPHABETICALLY:
         pdf_files.sort()
 
     print(f"🔍 Found {len(pdf_files)} PDF files. Combining now...\n")
     print(f"📄 Merge order: {'Alphabetical' if MERGE_ALPHABETICALLY else 'Folder order'}\n")
 
-    # Step 7: Loop through each file and merge it
+    seen_file_names = set()
+    seen_page_hashes = set()
+
     for filename in pdf_files:
+        file_skipped = False
+
+        # Check for duplicate file name
+        if SKIP_DUPLICATE_FILE_NAMES and filename in seen_file_names:
+            print(f"⚠️ Skipping duplicate file name: {filename}")
+            file_skipped = True
+        else:
+            seen_file_names.add(filename)
+
         file_path = os.path.join(current_dir, filename)
+
         try:
             with fitz.open(file_path) as pdf:
-                combined_pdf.insert_pdf(pdf)
-            print(f"✅ Added: {filename}")
+                for page in pdf:
+                    if SKIP_DUPLICATE_PAGES:
+                        ph = page_hash(page)
+                        if ph in seen_page_hashes:
+                            file_skipped = True
+                            continue
+                        seen_page_hashes.add(ph)
+                    combined_pdf.insert_pdf(fitz.open(file_path), from_page=page.number, to_page=page.number)
+            if not file_skipped:
+                print(f"✅ Added: {filename}")
         except Exception as e:
             print(f"❌ Error processing {filename}: {e}")
+            file_skipped = True
 
-    # Step 8: Save the combined PDF
+        # Log skipped PDF if any reason to skip
+        if file_skipped:
+            with open(skipped_log, 'a') as f:
+                f.write(filename + "\n")
+
     try:
         combined_pdf.save(output_filename)
         print(f"\n🎉 All PDFs combined successfully into: {output_filename}")
+        print(f"ℹ️ Skipped PDFs (if any) are logged in '{skipped_log}'")
     except Exception as e:
         print(f"🚨 Failed to save combined file: {e}")
     finally:
         combined_pdf.close()
 
-
-# ==============================
-# Script Entry Point
-# ==============================
 if __name__ == "__main__":
     try:
-        combine_pdfs_in_current_folder()
+        combine_pdfs()
     except Exception as e:
         print(f"\n🚨 Fatal error occurred: {e}")
-        sys.exit(1)
+
