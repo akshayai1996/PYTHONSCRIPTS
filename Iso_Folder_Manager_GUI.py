@@ -63,16 +63,23 @@ def make_folder_name(loop_no: str, system_no: str) -> str:
 def find_iso_on_server(iso_no: str, server_path: str) -> str:
     if not iso_no or not isinstance(iso_no, str):
         return ""
-    candidate = os.path.join(server_path, iso_no)
-    if os.path.isfile(candidate):
-        return candidate
+    iso_no = iso_no.strip()
+    
+    # Search for files matching pattern: *({iso_no}).pdf
     if os.path.isdir(server_path):
         try:
             for item in os.listdir(server_path):
-                if item.lower() == iso_no.lower():
-                    full_path = os.path.join(server_path, item)
-                    if os.path.isfile(full_path):
-                        return full_path
+                if item.lower().endswith(".pdf"):
+                    # Extract text in parenthesis: filename(abc-def).pdf -> abc-def
+                    if "(" in item and ")" in item:
+                        start = item.rfind("(")
+                        end = item.rfind(")")
+                        if start < end:
+                            extracted = item[start+1:end]
+                            if extracted.lower() == iso_no.lower():
+                                full_path = os.path.join(server_path, item)
+                                if os.path.isfile(full_path):
+                                    return full_path
         except PermissionError:
             pass
     return ""
