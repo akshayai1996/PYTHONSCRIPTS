@@ -1,69 +1,55 @@
-
-🤖 Complete Master Orchestrator: Full 7-Process Workflow (v3.1)
-📌 Code Explanation for Non-Technical Users
-This script is a project manager in code that automates the organization and assembly of project documents.
- * It asks you (via pop-up windows) for five main locations: the central Excel sheet (the task list), the folder where all source documents (ISOs) are stored, a Master Index File (which pages to extract), the Master PDF (the source book for pages), and the Destination Folder (where the final organized project structure will be created).
- * It reads the Excel and creates a dedicated, clearly named folder for every item in your list.
- * It automatically fetches the original ISO document from your server and copies it into its new folder (P1).
- * It uses the Master Index to find the specific pages needed for that ISO and extracts them from the Master PDF, saving them as individual files (P2, P3).
- * It makes a secure backup of every file in the main folder by creating a copy with a _FRI suffix (P4).
- * It cleans up any unnecessary original ISO files that didn't have pages mapped (P5).
- * Finally, it merges all the remaining necessary documents and extracted pages in that folder into one comprehensive PDF file named Combined.pdf (P6).
-This process ensures every project folder is complete, backed up, and consolidated for easy review.
 """
 ===============================================================================
- Project Name:    Complete Master Orchestrator - Full 7-Process Workflow
- File Name:       Master_Orchestrator_Final_v3.1.py
- Description:     Runs 7 interconnected processes:
-                  P1: ISO Manager
-                  P2: Generate Excel with ISO->Page Mapping
-                  P3: Extract Pages (duplicate-safe)
-                  P4: FRI Copies (Modified: uses _FRI suffix in source folder)
-                  P5: Cleanup Redundancy
-                  P6: Combine PDFs
-                  P7: Final Cleanup + Verification
-
- Author:          Akshay Solanki (Original), Gemini (Updates)
- Created on:      19-Oct-2025
- Version:         3.1
- Dependencies:    pandas, openpyxl, tkinter, tqdm, PyPDF2, fitz, re
- Notes:           GUI-based path selection; incremental updates supported.
+ Project Name:    Complete Master Orchestrator - Final Synchronized Workflow
+ File Name:       Master_Orchestrator_Final_Compiled_Fixed.py
+ Description:     Runs 7 interconnected processes using external index and caching.
+ Author:          Akshay Solanki (Compiled Final Version with Fixes)
+ Created on:      21-Oct-2025
+ Dependencies:    pandas, openpyxl, tkinter, tqdm, fitz, PyPDF2, re, hashlib, json
 ===============================================================================
 """
-import os, shutil, re, time
-from collections import defaultdict
-from datetime import datetime
+
+import os
+import shutil
 import pandas as pd
-from tqdm import tqdm
+import re
+import hashlib
+from datetime import datetime
+from collections import defaultdict
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
-import PyPDF2
+from tqdm import tqdm
+import time
+import fitz        # Used for P6 PDF merging and content hashing
+import PyPDF2    # Used for P3 simple page extraction
+import json
 
-# ===============================
-# Global Log and Error Paths
-# ===============================
+# --- GLOBAL CONSTANTS ---
 LOG_FILE = os.path.join(os.getcwd(), "orchestrator_log.txt")
 ERROR_REPORT = os.path.join(os.getcwd(), "error_report.txt")
+P4_CACHE_FILE = os.path.join(os.getcwd(), "linewise_index_cache.json")
+P6_CACHE_NAME = ".merge_cache.json"
+PDF_INDEX_REFERENCE_NAME = "PDF_TOC_Reference.txt"
+OUTPUT_EXCEL_NAME = "output.xlsx" # System-level Excel file name
+FINAL_PDF_SUFFIX = ".pdf"
 
-# ===============================
-# Logging Functions
-# ===============================
+# --- UTILITY FUNCTIONS ---
 def log_msg(msg):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{timestamp}] {msg}"
     print(line)
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception as e:
+        print(f"ERROR logging: {e}")
 
 def log_error(msg):
     with open(ERROR_REPORT, "a", encoding="utf-8") as f:
         f.write(msg + "\n")
 
-# ===============================
-# GUI File/Folder Selectors
-# ===============================
 def select_folder(title):
     root = tk.Tk()
     root.withdraw()
@@ -71,87 +57,78 @@ def select_folder(title):
     root.destroy()
     return folder
 
-def select_file(title, filetypes=[("All files", "*.*")]):
+def select_file(title, filetypes):
     root = tk.Tk()
     root.withdraw()
     file = filedialog.askopenfilename(title=title, filetypes=filetypes)
     root.destroy()
     return file
 
-# ===============================
-# Time Formatter
-# ===============================
 def format_time(seconds):
     hrs = int(seconds // 3600)
     mins = int((seconds % 3600) // 60)
     secs = int(seconds % 60)
     return f"{hrs:02d}:{mins:02d}:{secs:02d}"
 
-# ===============================
-# Safe Copy for ISO/PDF
-# ===============================
+# --- PROCESS 1: ISO MANAGER ---
 def safe_copy(src, dest):
     if not os.path.exists(src):
         raise FileNotFoundError(src)
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    dest_dir = os.path.dirname(dest)
+    os.makedirs(dest_dir, exist_ok=True)
     base, ext = os.path.splitext(dest)
+    if os.path.exists(dest) and os.path.getsize(src) == os.path.getsize(dest):
+        return dest
     candidate = dest
     i = 1
     while os.path.exists(candidate):
-        if os.path.getsize(candidate) == os.path.getsize(src):
-            # File already exists and is identical, no copy needed.
-            return candidate
-        # File exists but is different, create a duplicate with a suffix.
         candidate = f"{base}_dup{i}{ext}"
         i += 1
     shutil.copy2(src, candidate)
     return candidate
 
-# ===============================
-# Folder & ISO Helpers
-# ===============================
 def make_folder_name(loop_no: str, system_no: str) -> str:
     return f"{str(loop_no).strip()}_{str(system_no).strip()}"
 
 def find_iso_on_server(iso_no: str, server_path: str) -> str:
-    if not iso_no:
+    if not iso_no or not isinstance(iso_no, str):
         return ""
-    iso_no = iso_no.strip().lower()
-    try:
-        for item in os.listdir(server_path):
-            if item.lower().endswith(".pdf") and f"({iso_no})" in item.lower():
-                full_path = os.path.join(server_path, item)
-                if os.path.isfile(full_path):
-                    return full_path
-    except PermissionError:
-        pass
+    iso_no = iso_no.strip()
+    if os.path.isdir(server_path):
+        try:
+            for item in os.listdir(server_path):
+                if item.lower().endswith(FINAL_PDF_SUFFIX):
+                    if "(" in item and ")" in item:
+                        start = item.rfind("(")
+                        end = item.rfind(")")
+                        if start < end:
+                            extracted = item[start+1:end]
+                            if extracted.lower() == iso_no.lower():
+                                full_path = os.path.join(server_path, item)
+                                if os.path.isfile(full_path):
+                                    return full_path
+        except PermissionError:
+            pass
     return ""
 
-# ===============================
-# Excel Utilities (Pre-flight Check)
-# ===============================
 def create_or_update_excel(excel_file):
     headers = ["Iso no", "loop no", "system no", "folder name", "history folder name", "ISO Status"]
     if not os.path.exists(excel_file):
         df = pd.DataFrame(columns=headers)
         df.to_excel(excel_file, index=False)
-        messagebox.showinfo("Excel Created", f"Pre-flight check failed. Please fill first three columns and save: {excel_file}")
+        log_msg(f"Created Excel: {excel_file}")
+        messagebox.showinfo("Excel Created", f"Fill first three columns and save.")
         return False
-    
-    # Pre-flight check passed: file exists. Now, ensure data structure is correct.
     df = pd.read_excel(excel_file, dtype=str).fillna("")
     for col in headers:
         if col not in df.columns:
             df[col] = ""
     df = df[headers]
-    
-    # Ensure folder names are calculated and history is initialized.
     for idx, row in df.iterrows():
-        df.at[idx, "folder name"] = make_folder_name(row["loop no"], row["system no"])
+        new_folder_name = make_folder_name(row["loop no"], row["system no"])
+        df.at[idx, "folder name"] = new_folder_name
         if not row["history folder name"]:
-            df.at[idx, "history folder name"] = row["folder name"]
-    
-    # Save the updated structure back before P1 runs.
+            df.at[idx, "history folder name"] = new_folder_name
     df.to_excel(excel_file, index=False)
     return True
 
@@ -169,16 +146,12 @@ def highlight_missing_iso(excel_file):
             cell = ws.cell(row=row, column=col_idx)
             status_val = str(cell.value).strip().upper() if cell.value else ""
             fill = red_fill if status_val == "MISSING" else clear_fill
-            # Apply fill to the entire row if ISO is missing
             for c in range(1, ws.max_column + 1):
                 ws.cell(row=row, column=c).fill = fill
         wb.save(excel_file)
     except Exception as e:
         log_msg(f"ERROR highlighting: {e}")
 
-# ===============================
-# P1: ISO MANAGER
-# ===============================
 def iso_manager(excel_file, server_path, dest_root):
     process_start = time.time()
     log_msg("=== P1: ISO MANAGER START ===")
@@ -203,16 +176,27 @@ def iso_manager(excel_file, server_path, dest_root):
             if history != desired and os.path.exists(history_path):
                 if not os.path.exists(desired_path):
                     os.rename(history_path, desired_path)
+                    log_msg(f"RENAMED: {history} -> {desired}")
                 else:
                     for f_name in os.listdir(history_path):
                         srcf = os.path.join(history_path, f_name)
                         dstf = os.path.join(desired_path, f_name)
-                        safe_copy(srcf, dstf)
-                    try: os.rmdir(history_path)
-                    except: pass
+                        if os.path.exists(dstf) and os.path.isfile(srcf):
+                            safe_copy(srcf, dstf)
+                            try:
+                                os.remove(srcf)
+                            except OSError:
+                                pass
+                        elif not os.path.exists(dstf):
+                            shutil.move(srcf, dstf)
+                    try:
+                        os.rmdir(history_path)
+                    except OSError:
+                        pass
                 df.loc[df["history folder name"] == history, "history folder name"] = desired
                 processed_folders[key] = True
-            os.makedirs(desired_path, exist_ok=True)
+            if not os.path.exists(desired_path):
+                os.makedirs(desired_path, exist_ok=True)
             df.at[idx, "history folder name"] = desired
         except Exception as e:
             log_msg(f"ERROR row {idx}: {e}")
@@ -241,421 +225,614 @@ def iso_manager(excel_file, server_path, dest_root):
 
     df.to_excel(excel_file, index=False)
     highlight_missing_iso(excel_file)
-    log_msg(f"=== P1: ISO MANAGER END ({format_time(time.time() - process_start)}) ===\n")
+    elapsed = time.time() - process_start
+    log_msg(f"=== P1: ISO MANAGER END ({format_time(elapsed)}) ===\n")
 
-# ===============================
-# P2: GENERATE EXCEL
-# ===============================
-def generate_excel(dest_root, index_file_path, output_excel_name="output.xlsx"):
+# --- PROCESS 2: GENERATE EXCEL ---
+def generate_excel(dest_root):
     process_start = time.time()
     log_msg("=== P2: GENERATE EXCEL START ===")
-
-    iso_page_map = defaultdict(list)
-    try:
-        with open(index_file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) >= 2:
-                    pdf_file = parts[0].lower()
-                    page = parts[1]
-                    if page.isdigit():
-                        iso_page_map[pdf_file].append(int(page))
-    except FileNotFoundError:
-        log_msg(f"❌ Index file not found: {index_file_path}")
-        return
-
     pdf_pattern = re.compile(r'\(([^)]+)\)\.pdf$', re.IGNORECASE)
     processed = 0
+    
+    # CRITICAL FIX: Only process direct children of dest_root
     for root, dirs, _ in os.walk(dest_root):
-        for dir_name in tqdm(dirs, desc="[P2] Generating Excel", ncols=80):
-            subdir = os.path.join(root, dir_name)
-            excel_path = os.path.join(subdir, output_excel_name)
-            iso_set = set()
-            
-            # Look for ISOs in the folder (ignoring the Combined.pdf if present)
-            pdf_files = [f for f in os.listdir(subdir) if f.lower().endswith('.pdf') and "combined" not in f.lower()]
-            for file in pdf_files:
-                match = pdf_pattern.search(file)
-                if match:
-                    # Extract the ISO part (e.g., from (ISO-1234-A).pdf -> ISO-1234)
-                    seg = match.group(1).split('-')
-                    if len(seg) >= 2:
-                        iso_set.add(f"{seg[0]}-{seg[1]}")
+        if root == dest_root:
+            for dir_name in tqdm(dirs, desc="[P2] Generating Excel", ncols=80):
+                subdir = os.path.join(root, dir_name)
+                excel_path = os.path.join(subdir, OUTPUT_EXCEL_NAME)
+                iso_set = set()
+                
+                pdf_files = [f for f in os.listdir(subdir) if f.lower().endswith(FINAL_PDF_SUFFIX)]
+                
+                for file in pdf_files:
+                    match = pdf_pattern.search(file)
+                    if match:
+                        parenthesis_content = match.group(1)
+                        segments = parenthesis_content.split('-')
+                        if len(segments) >= 2:
+                            iso = f"{segments[0].strip()}-{segments[1].strip()}"
+                            iso_set.add(iso)
+                
+                if iso_set:
+                    existing_iso = set()
+                    if os.path.exists(excel_path):
+                        try:
+                            # Read existing ISOs only if file exists
+                            df_existing = pd.read_excel(excel_path, dtype=str).fillna("")
+                            existing_iso = set(df_existing.get("ISO LIST", pd.Series()).dropna().astype(str))
+                        except Exception as e:
+                            log_error(f"P2: Error reading existing Excel in {subdir}: {e}")
+                            
+                    new_isos = [iso for iso in sorted(iso_set) if iso not in existing_iso]
+                    
+                    if new_isos or not os.path.exists(excel_path):
+                        df_new = pd.DataFrame({"ISO LIST": new_isos})
+                        if existing_iso and os.path.exists(excel_path):
+                            # Retain any non-ISO LIST columns from existing file if it exists
+                            df_final = pd.concat([df_existing.filter(items=["ISO LIST"]), df_new], ignore_index=True).drop_duplicates()
+                        else:
+                            df_final = df_new
                         
-            if not iso_set:
-                continue
-                
-            existing_iso = set()
-            df_existing = pd.DataFrame()
-            if os.path.exists(excel_path):
-                try:
-                    df_existing = pd.read_excel(excel_path)
-                    if "ISO LIST" in df_existing.columns:
-                        existing_iso = set(df_existing["ISO LIST"].dropna().astype(str))
-                except Exception:
-                    # Handle corrupted or unreadable Excel, treat as new
-                    df_existing = pd.DataFrame()
-            
-            new_isos = [iso for iso in sorted(iso_set) if iso not in existing_iso]
-            if not new_isos:
-                continue
-                
-            pdf_pages = []
-            for iso in new_isos:
-                pages = []
-                # Check for ISO pages in the index map
-                for pdf_file, pnums in iso_page_map.items():
-                    if iso.lower() in pdf_file:
-                        pages.extend(pnums)
-                pdf_pages.append(",".join(str(p) for p in sorted(set(pages))))
-                
-            df_new = pd.DataFrame({"ISO LIST": new_isos, "PDF PAGE": pdf_pages})
-            
-            if not df_existing.empty:
-                df_final = pd.concat([df_existing, df_new], ignore_index=True)
-            else:
-                df_final = df_new
-                
-            # Ensure "ISO Status" column exists for P7 verification
-            if "ISO Status" not in df_final.columns:
-                df_final["ISO Status"] = ""
-                
-            df_final.to_excel(excel_path, index=False)
-            processed += 1
-            log_msg(f"Updated Excel: {subdir}")
+                        df_final.to_excel(excel_path, index=False)
+                        processed += 1
+                        log_msg(f"Updated Excel: {subdir}")
+                # Note on Empty Directory Handling (Error 7): Folders without PDFs are correctly skipped.
+    
+    elapsed = time.time() - process_start
+    log_msg(f"=== P2: GENERATE EXCEL END ({format_time(elapsed)}) - {processed} folders ===\n")
 
-    log_msg(f"=== P2: GENERATE EXCEL END ({format_time(time.time() - process_start)}) - {processed} folders ===\n")
-
-# ===============================
-# P3: EXTRACT PAGES
-# ===============================
-def extract_pages(dest_root, master_pdf, excel_filename="output.xlsx"):
+# --- PROCESS 3: EXTRACT PAGES (EXTERNAL INDEX) ---
+def extract_pages(dest_root, pdf_path, page_index_excel):
     process_start = time.time()
-    log_msg("=== P3: EXTRACT PAGES START ===")
-
-    if not os.path.exists(master_pdf):
-        log_msg(f"ERROR: Master PDF not found: {master_pdf}")
+    log_msg("=== P3: EXTRACT PAGES START (Reading External Index) ===")
+    
+    if not os.path.exists(pdf_path):
+        log_msg(f"ERROR: Master PDF not found: {pdf_path}")
+        log_error(f"P3: Master PDF not found {pdf_path}")
+        return
+    
+    if not os.path.exists(page_index_excel):
+        log_msg(f"ERROR: Page Index Excel not found: {page_index_excel}. Skipping P3.")
+        log_error(f"P3: Page Index Excel not found {page_index_excel}")
         return
 
+    # 1. BUILD GLOBAL ISO -> PAGE MAP from the Master Index Excel
+    iso_page_map = {}
     try:
-        pdf_reader = PyPDF2.PdfReader(master_pdf)
+        master_df = pd.read_excel(page_index_excel, dtype=str).fillna("")
+        if 'ISO LIST' not in master_df.columns or 'PDF PAGE' not in master_df.columns:
+            log_msg("ERROR: Master Index Excel requires columns 'ISO LIST' and 'PDF PAGE'. Skipping P3.")
+            log_error("P3: Master Index Excel format error.")
+            return
+
+        for _, row in master_df.iterrows():
+            iso = str(row['ISO LIST']).strip()
+            pages = str(row['PDF PAGE']).strip()
+            if iso and pages:
+                iso_page_map[iso.upper()] = pages
+        
+        log_msg(f"Loaded {len(iso_page_map)} ISO entries from Master Page Index.")
+
+    except Exception as e:
+        log_msg(f"FATAL ERROR reading Master Index Excel: {e}")
+        log_error(f"P3: Error reading Master Index: {e}")
+        return
+
+    # 2. PERFORM EXTRACTION
+    extracted = 0
+    try:
+        pdf_reader = PyPDF2.PdfReader(pdf_path)
         total_pages = len(pdf_reader.pages)
     except Exception as e:
-        log_msg(f"ERROR reading master PDF: {e}")
+        log_msg(f"ERROR: Cannot read Master PDF {e}")
+        log_error(f"P3: Cannot read Master PDF {e}")
         return
-
+    
+    # CRITICAL FIX: Only process direct children of dest_root
     for root, dirs, _ in os.walk(dest_root):
-        for dir_name in tqdm(dirs, desc="[P3] Extracting Pages", ncols=80):
-            subdir = os.path.join(root, dir_name)
-            excel_path = os.path.join(subdir, excel_filename)
-            if not os.path.exists(excel_path):
-                continue
-            try:
-                df = pd.read_excel(excel_path)
-                if "PDF PAGE" not in df.columns:
-                    continue
-                for idx, row in df.iterrows():
-                    pages_str = str(row["PDF PAGE"])
-                    if not pages_str or pages_str.lower() == "nan" or not pages_str.strip():
-                        continue
-                    
-                    # Process page numbers from the Excel cell
-                    for p in pages_str.split(','):
-                        p = p.strip()
-                        if p.isdigit():
-                            page_num = int(p)
-                            # PyPDF2 is 0-indexed, so page 1 is index 0.
-                            if 1 <= page_num <= total_pages:
-                                out_pdf = os.path.join(subdir, f"{page_num}.pdf")
-                                if os.path.exists(out_pdf):
-                                    continue # Skip if page already extracted
-                                    
-                                pdf_writer = PyPDF2.PdfWriter()
-                                pdf_writer.add_page(pdf_reader.pages[page_num-1])
-                                
-                                with open(out_pdf, 'wb') as f:
-                                    pdf_writer.write(f)
-            except Exception as e:
-                log_error(f"P3: Error processing {subdir}: {e}")
-
-    log_msg(f"=== P3: EXTRACT PAGES END ({format_time(time.time() - process_start)}) ===\n")
-    
-# ===============================
-# P4: FRI COPIES (MODIFIED)
-# Saves copy with _FRI suffix in the same folder.
-# ===============================
-def fri_copies(dest_root):
-    process_start = time.time()
-    log_msg("=== P4: FRI COPIES START (Direct Copy with _FRI Suffix) ===")
-    
-    # Files to exclude from copying (these are typically generated later or are temporary)
-    EXCLUDE_FILES = ["combined.pdf", "output.xlsx"]
-    
-    for root, dirs, _ in os.walk(dest_root):
-        for dir_name in tqdm(dirs, desc="[P4] Creating FRI Copies", ncols=80):
-            subdir = os.path.join(root, dir_name)
-            
-            # Find all PDF files that are not explicitly excluded
-            pdf_files = [
-                f for f in os.listdir(subdir) 
-                if f.lower().endswith(".pdf") and os.path.isfile(os.path.join(subdir, f)) and f.lower() not in EXCLUDE_FILES
-            ]
-            
-            for pdf in pdf_files:
-                src = os.path.join(subdir, pdf)
+        if root == dest_root:
+            for dir_name in tqdm(dirs, desc="[P3] Extracting Pages", ncols=80):
+                subdir = os.path.join(root, dir_name)
+                excel_path = os.path.join(subdir, OUTPUT_EXCEL_NAME)
                 
-                # Create the new destination name with _FRI suffix
-                base, ext = os.path.splitext(pdf)
-                # Check if it already has _FRI suffix (to prevent multiple copies in one run)
-                if base.lower().endswith("_fri"):
+                if not os.path.exists(excel_path):
                     continue
-                
-                dst_name = f"{base}_FRI{ext}"
-                dst = os.path.join(subdir, dst_name)
                 
                 try:
-                    safe_copy(src, dst)
-                except Exception as e:
-                    log_error(f"P4: Error copying {src} -> {dst}: {e}")
+                    # CRITICAL FIX: Improved error handling for reading the system Excel
+                    system_df = pd.read_excel(excel_path, dtype=str)
+                    if "ISO LIST" not in system_df.columns:
+                        log_error(f"P3: 'ISO LIST' column missing in {excel_path}. Skipping folder.")
+                        continue
                     
-    log_msg(f"=== P4: FRI COPIES END ({format_time(time.time() - process_start)}) ===\n")
+                    for iso_list_entry in system_df["ISO LIST"].dropna():
+                        iso = str(iso_list_entry).strip().upper()
+                        if not iso:
+                            continue
+                        
+                        pages_str = iso_page_map.get(iso, "")
+                        
+                        if pages_str:
+                            for p in pages_str.split(','):
+                                p = p.strip()
+                                if p.isdigit():
+                                    page_num = int(p)
+                                    
+                                    if 1 <= page_num <= total_pages:
+                                        output_path = os.path.join(subdir, f"{page_num}{FINAL_PDF_SUFFIX}")
+                                        if not os.path.exists(output_path):
+                                            try:
+                                                pdf_writer = PyPDF2.PdfWriter()
+                                                pdf_writer.add_page(pdf_reader.pages[page_num - 1]) 
+                                                with open(output_path, 'wb') as f:
+                                                    pdf_writer.write(f)
+                                                extracted += 1
+                                            except Exception as e:
+                                                log_error(f"P3: Error extracting page {page_num} for ISO {iso}: {e}")
+                                    else:
+                                        log_error(f"P3: Invalid page number {page_num} for ISO {iso} (Total pages: {total_pages}).")
+                except Exception as e:
+                    log_error(f"P3: Error processing {subdir} or system Excel: {e}")
+    
+    elapsed = time.time() - process_start
+    log_msg(f"=== P3: EXTRACT PAGES END ({format_time(elapsed)}) - {extracted} pages ===\n")
 
+# --- PROCESS 4: FRICOPY (CACHING) ---
+def extract_name_in_parentheses(filename):
+    match = re.search(r"\(([^)]+)\)", filename)
+    return match.group(1).strip() if match else None
 
-# ===============================
-# P5: CLEANUP REDUNDANT FILES
-# ===============================
-def cleanup_redundancy(dest_root, excel_filename="output.xlsx"):
+def get_dir_hash(path):
+    total_size = 0
+    file_count = 0
+    for dirpath, _, filenames in os.walk(path):
+        for f in filenames:
+            full_path = os.path.join(dirpath, f)
+            if f.lower().endswith(FINAL_PDF_SUFFIX): 
+                try:
+                    total_size += os.path.getsize(full_path)
+                    file_count += 1
+                except:
+                    pass
+    return hashlib.sha256(f"{file_count}-{total_size}".encode()).hexdigest()
+
+def create_linewise_index_cached(root_path):
+    current_hash = get_dir_hash(root_path)
+
+    if os.path.exists(P4_CACHE_FILE):
+        try:
+            with open(P4_CACHE_FILE, 'r') as f:
+                cache_data = json.load(f)
+            
+            if cache_data.get('hash') == current_hash:
+                log_msg("Loaded P4 index from cache (LINEWISE unchanged).")
+                indexed = {k: [(p, n) for p, n in v] for k, v in cache_data.get('index', {})}
+                return indexed
+            else:
+                log_msg("P4 index cache invalid (LINEWISE changed or structure mismatch). Rebuilding...")
+        except Exception as e:
+            log_msg(f"ERROR loading cache: {e}. Rebuilding...")
+
+    linewise_index = defaultdict(list)
+    for subdir, _, files in tqdm(os.walk(root_path), desc="[P4] Building Index", ncols=80, leave=False):
+        for linewise_file in files:
+            if linewise_file.lower().endswith(FINAL_PDF_SUFFIX):
+                search_key = os.path.splitext(linewise_file)[0].lower()
+                full_path = os.path.join(subdir, linewise_file)
+                linewise_index[search_key].append((full_path, linewise_file))
+
+    try:
+        cache_index = {k: [[p, n] for p, n in v] for k, v in linewise_index.items()}
+        with open(P4_CACHE_FILE, 'w') as f:
+            json.dump({'hash': current_hash, 'index': cache_index}, f)
+        log_msg("P4 index rebuilt and saved to cache.")
+    except Exception as e:
+        log_msg(f"ERROR saving P4 cache: {e}")
+        
+    return linewise_index
+
+def fricopy(backup_root, linewise_root):
+    process_start = time.time()
+    log_msg("=== P4: FRICOPY START (Using Cached Index) ===")
+    
+    linewise_index = create_linewise_index_cached(linewise_root)
+    if not linewise_index:
+        log_msg("ERROR: Failed to index LINEWISE")
+        log_error("P4: Failed to index LINEWISE")
+        return
+    
+    all_backup_files = []
+    # CRITICAL FIX: Only process direct children of dest_root
+    for root, dirs, _ in os.walk(backup_root):
+        if root == backup_root:
+            for dir_name in dirs:
+                subdir = os.path.join(root, dir_name)
+                for file in os.listdir(subdir):
+                    if file.lower().endswith(FINAL_PDF_SUFFIX) and not file.lower().endswith("_fri.pdf"):
+                        all_backup_files.append((subdir, file))
+
+    copied = 0
+    for subdir, file in tqdm(all_backup_files, desc="[P4] Creating FRI copies", ncols=80):
+        base_name = extract_name_in_parentheses(file)
+        if not base_name:
+            continue
+        base_name_lower = base_name.lower()
+        
+        for linewise_key, linewise_entries in linewise_index.items():
+            if base_name_lower in linewise_key:
+                for full_path, lw_file in linewise_entries:
+                    target_filename = os.path.splitext(lw_file)[0] + "_FRI.pdf"
+                    target_path = os.path.join(subdir, target_filename)
+                    if not os.path.exists(target_path) or os.path.getsize(full_path) != os.path.getsize(target_path):
+                        try:
+                            shutil.copy2(full_path, target_path)
+                            copied += 1
+                        except Exception as e:
+                            log_error(f"P4: Error copying FRI: {e}")
+    
+    elapsed = time.time() - process_start
+    log_msg(f"=== P4: FRICOPY END ({format_time(elapsed)}) - {copied} copies ===\n")
+
+# --- PROCESS 5: CLEANUP REDUNDANCY ---
+def cleanup_redundancy(dest_root, excel_file):
     process_start = time.time()
     log_msg("=== P5: CLEANUP REDUNDANCY START ===")
     
-    # Pattern to match original ISO files, excluding page extracts and FRI copies
-    ISO_PATTERN = re.compile(r'\(([^)]+)\)\.pdf$', re.IGNORECASE)
+    df = pd.read_excel(excel_file, dtype=str).fillna("")
+    folder_iso_map = {}
+    for _, row in df.iterrows():
+        folder = row["folder name"].strip()
+        iso_no = row["Iso no"].strip()
+        if folder and iso_no:
+            if folder not in folder_iso_map:
+                folder_iso_map[folder] = []
+            folder_iso_map[folder].append(iso_no)
     
-    for root, dirs, _ in os.walk(dest_root):
-        for dir_name in tqdm(dirs, desc="[P5] Cleaning Redundant PDFs", ncols=80):
-            subdir = os.path.join(root, dir_name)
-            excel_path = os.path.join(subdir, excel_filename)
-            if not os.path.exists(excel_path):
+    deleted = 0
+    # CRITICAL FIX: Only process direct children of dest_root (os.listdir is appropriate here)
+    for folder_name in tqdm(os.listdir(dest_root), desc="[P5] Cleaning redundancy", ncols=80):
+        folder_path = os.path.join(dest_root, folder_name)
+        if not os.path.isdir(folder_path):
+            continue
+        
+        expected_isos = folder_iso_map.get(folder_name, [])
+        if not expected_isos:
+            continue
+        
+        for file_name in os.listdir(folder_path):
+            file_path = os.path.join(folder_path, file_name)
+            if not os.path.isfile(file_path):
                 continue
-                
-            try:
-                df = pd.read_excel(excel_path)
-                if "ISO LIST" not in df.columns:
-                    continue
-                    
-                # Get the set of valid ISOs that MUST be kept
-                valid_isos = set(df["ISO LIST"].dropna().astype(str))
-                
-                pdf_files = [f for f in os.listdir(subdir) if f.lower().endswith(".pdf")]
-                
-                for pdf in pdf_files:
-                    # Only check files that look like original ISOs (e.g., have the parenthesized number)
-                    match = ISO_PATTERN.search(pdf)
-                    
-                    # Exclude extracted pages (e.g., 10.pdf) and FRI copies (handled by checking for _FRI suffix)
-                    if match and "_FRI" not in pdf.upper():
-                        
-                        # Extract the base ISO number (e.g., ISO-1234)
-                        iso_match_part = match.group(1).split('-')
-                        iso = '-'.join(iso_match_part[:2])
-                        
-                        if iso not in valid_isos:
-                            # This ISO is redundant, delete it.
-                            file_to_delete = os.path.join(subdir, pdf)
-                            try: 
-                                os.remove(file_to_delete)
-                                log_msg(f"P5: Deleted redundant ISO {pdf} in {dir_name}")
-                            except Exception as e:
-                                log_error(f"P5: Could not delete {pdf} in {subdir}: {e}")
-                                
-            except Exception as e:
-                log_error(f"P5: Error in {subdir}: {e}")
-                
-    log_msg(f"=== P5: CLEANUP REDUNDANCY END ({format_time(time.time() - process_start)}) ===\n")
-
-
-# ===============================
-# P6: COMBINE PDFs
-# ===============================
-def combine_pdfs(dest_root, combined_name="Combined.pdf"):
-    process_start = time.time()
-    log_msg("=== P6: COMBINE PDFs START ===")
-    
-    for root, dirs, _ in os.walk(dest_root):
-        for dir_name in tqdm(dirs, desc="[P6] Combining PDFs", ncols=80):
-            subdir = os.path.join(root, dir_name)
             
-            # Get files, prioritizing extracted pages (numeric names) first, then ISOs, excluding FRI copies.
-            all_pdfs = [f for f in os.listdir(subdir) if f.lower().endswith(".pdf") and "_FRI" not in f.upper() and "COMBINED" not in f.upper()]
-            
-            # Sort: Numeric files (pages) come first, then ISO files alphabetically.
-            def sort_key(f):
-                try:
-                    # Pages (e.g., 10.pdf) get numeric priority
-                    return (0, int(os.path.splitext(f)[0]))
-                except ValueError:
-                    # ISOs and others come after pages
-                    return (1, f.lower())
-
-            pdf_files = sorted(all_pdfs, key=sort_key)
-            
-            if not pdf_files:
+            # Keep the final combined PDF
+            if file_name.lower() == f"{folder_name.lower()}{FINAL_PDF_SUFFIX}":
                 continue
-                
-            combined_path = os.path.join(subdir, combined_name)
-            pdf_writer = PyPDF2.PdfWriter()
+
+            belongs = False
+            # Check if file name contains any expected ISO
+            for iso_no in expected_isos:
+                if iso_no.lower() in file_name.lower():
+                    belongs = True
+                    break
             
-            # Set to track pages added to prevent duplicates from the same source PDF
-            added_pages = set() 
+            # Check for extracted page PDFs (e.g., '1.pdf', '10.pdf')
+            if re.match(r'^\d+\.pdf$', file_name.lower()):
+                 belongs = True
             
-            for pdf in pdf_files:
-                pdf_path = os.path.join(subdir, pdf)
+            # Check for FRI copies
+            if file_name.lower().endswith("_fri.pdf"):
+                belongs = True
+
+            if not belongs:
                 try:
-                    reader = PyPDF2.PdfReader(pdf_path)
-                    for p in range(len(reader.pages)):
-                        key = (pdf, p)
-                        if key not in added_pages:
-                            pdf_writer.add_page(reader.pages[p])
-                            added_pages.add(key)
+                    os.remove(file_path)
+                    deleted += 1
                 except Exception as e:
-                    log_error(f"P6: Could not read {pdf_path}: {e}")
-            
-            # Only write if there's content
-            if pdf_writer.pages:
-                try:
-                    with open(combined_path, 'wb') as f:
-                        pdf_writer.write(f)
-                except Exception as e:
-                    log_error(f"P6: Could not write combined PDF in {subdir}: {e}")
-                    
-    log_msg(f"=== P6: COMBINE PDFs END ({format_time(time.time() - process_start)}) ===\n")
+                    log_error(f"P5: Error deleting {file_name}: {e}")
+    
+    elapsed = time.time() - process_start
+    log_msg(f"=== P5: CLEANUP REDUNDANCY END ({format_time(elapsed)}) - {deleted} deleted ===\n")
 
+# --- PROCESS 6: COMBINE PDF (CUSTOM SORTING & CACHING) ---
+def page_hash(page):
+    return hashlib.sha256(page.get_text("xml").encode('utf-8')).hexdigest()
 
-# ===============================
-# P7: FINAL CLEANUP & VERIFICATION
-# ===============================
-def final_cleanup(dest_root, excel_filename="output.xlsx"):
+def get_folder_source_hash(folder_path, pdf_files):
+    current_hash = hashlib.md5()
+    for f in sorted(pdf_files):
+        fpath = os.path.join(folder_path, f)
+        try:
+            with open(fpath, 'rb') as file:
+                current_hash.update(file.read())
+        except Exception as e:
+            log_error(f"P6: Error hashing {f}: {e}")
+            return None 
+    return current_hash.hexdigest()
+
+def get_sort_key(filename):
+    """
+    Defines the custom sort order: Numeric -> ISO -> FRI
+    """
+    name = filename.lower()
+    base, _ = os.path.splitext(name)
+    
+    # 1. Numeric PDFs: <0, number> (e.g., 1.pdf, 10.pdf)
+    if re.fullmatch(r'\d+', base):
+        try:
+            return (0, int(base)) 
+        except ValueError:
+            return (99, base)
+
+    # 3. FRI ISO PDFs: <2, filename> (e.g., (123-456)_FRI.pdf)
+    elif name.endswith("_fri.pdf"):
+        return (2, name.replace("_fri.pdf", FINAL_PDF_SUFFIX))
+
+    # 2. Main ISO PDFs: <1, filename> (e.g., (123-456).pdf)
+    else:
+        return (1, name)
+
+def combine_pdfs(dest_root):
     process_start = time.time()
-    log_msg("=== P7: FINAL CLEANUP & VERIFICATION START ===")
+    log_msg("=== P6: COMBINE PDF START (Using Merge Cache and Custom Sort) ===")
     
-    # Pattern to match original ISO files
-    ISO_PATTERN = re.compile(r'\(([^)]+)\)\.pdf$', re.IGNORECASE)
-    
+    combined = 0
+    # CRITICAL FIX: Only process direct children of dest_root
     for root, dirs, _ in os.walk(dest_root):
-        for dir_name in tqdm(dirs, desc="[P7] Verifying Excel vs PDFs", ncols=80):
-            subdir = os.path.join(root, dir_name)
-            excel_path = os.path.join(subdir, excel_filename)
-            if not os.path.exists(excel_path):
-                continue
+        if root == dest_root:
+            for dir_name in tqdm(dirs, desc="[P6] Combining PDFs", ncols=80):
+                folder_path = os.path.join(root, dir_name)
+                output_pdf_path = os.path.join(folder_path, f"{dir_name}{FINAL_PDF_SUFFIX}")
+                cache_file = os.path.join(folder_path, P6_CACHE_NAME)
                 
-            try:
-                df = pd.read_excel(excel_path)
-                if "ISO LIST" not in df.columns:
+                # 1. Filter out the final combined PDF
+                pdf_files = [
+                    f for f in os.listdir(folder_path) 
+                    if f.lower().endswith(FINAL_PDF_SUFFIX) and f.lower() != f"{dir_name.lower()}{FINAL_PDF_SUFFIX}" and not f.startswith('.')
+                ]
+                
+                if not pdf_files:
                     continue
-                    
-                pdf_files = [f for f in os.listdir(subdir) if f.lower().endswith(".pdf")]
-                pdf_isos = set()
+
+                # Check for changes (Reconstruction Logic)
+                current_source_hash = get_folder_source_hash(folder_path, pdf_files)
                 
-                # Identify which ISOs are actually present in the folder after cleanup
-                for pdf in pdf_files:
-                    match = ISO_PATTERN.search(pdf)
-                    if match and "_FRI" not in pdf.upper():
-                        # Extract the base ISO number
-                        iso_match_part = match.group(1).split('-')
-                        pdf_isos.add('-'.join(iso_match_part[:2]))
+                if os.path.exists(cache_file):
+                    try:
+                        with open(cache_file, 'r') as f:
+                            cache_data = json.load(f)
                         
-                # Update the ISO Status in the Excel
-                df["ISO Status"] = df["ISO LIST"].apply(lambda x: "OK" if str(x) in pdf_isos else "MISSING")
+                        if cache_data.get('source_hash') == current_source_hash:
+                            continue # Skip reconstruction
+                    except:
+                        pass
                 
-                df.to_excel(excel_path, index=False)
-                highlight_missing_iso(excel_path) # Highlight rows in the local output.xlsx
+                # 2. Apply Custom Sort
+                pdf_files.sort(key=get_sort_key)
                 
-            except Exception as e:
-                log_error(f"P7: Error in {subdir}: {e}")
+                combined_pdf = fitz.open()
+                seen_hashes = set()
                 
-    log_msg(f"=== P7: FINAL CLEANUP & VERIFICATION END ({format_time(time.time() - process_start)}) ===\n")
+                try:
+                    for filename in pdf_files:
+                        try:
+                            full_file_path = os.path.join(folder_path, filename)
+                            with fitz.open(full_file_path) as pdf:
+                                for page in pdf:
+                                    # Deduplication logic
+                                    ph = page_hash(page)
+                                    if ph not in seen_hashes:
+                                        combined_pdf.insert_pdf(pdf, from_page=page.number, to_page=page.number)
+                                        seen_hashes.add(ph)
+                        except Exception as e:
+                            log_error(f"P6: Error combining {filename}: {e}")
+                    
+                    # 3. Save the combined file
+                    if combined_pdf.page_count > 0:
+                        combined_pdf.save(output_pdf_path, garbage=4, deflate=True)
+                        combined += 1
+                        
+                        # Update cache
+                        try:
+                            with open(cache_file, 'w') as f:
+                                json.dump({'source_hash': current_source_hash, 'timestamp': datetime.now().isoformat()}, f)
+                        except Exception as e:
+                            log_error(f"P6: Error writing cache for {dir_name}: {e}")
+                            
+                finally:
+                    if 'combined_pdf' in locals() and combined_pdf:
+                        combined_pdf.close()
+    
+    elapsed = time.time() - process_start
+    log_msg(f"=== P6: COMBINE PDF END ({format_time(elapsed)}) - {combined} combined ===\n")
 
-# ===============================
-# Main Orchestrator Execution Logic
-# ===============================
+# --- PROCESS 7: FINAL CLEANUP + VERIFY ---
+def final_cleanup_and_verify(dest_root, excel_file):
+    process_start = time.time()
+    log_msg("=== P7: FINAL CLEANUP + ERROR CHECK START ===")
+    
+    df = pd.read_excel(excel_file, dtype=str).fillna("")
+    issues_found = 0
+    
+    # CRITICAL FIX: Only process direct children of dest_root (os.listdir is appropriate here)
+    for folder_name in os.listdir(dest_root):
+        folder_path = os.path.join(dest_root, folder_name)
+        if not os.path.isdir(folder_path):
+            continue
+        
+        folder_in_excel = any(df["folder name"] == folder_name)
+        
+        # Check for orphaned empty folders not in the main Excel
+        if not folder_in_excel and not os.listdir(folder_path):
+            try:
+                os.rmdir(folder_path)
+                log_msg(f"Deleted orphaned empty folder: {folder_name}")
+            except:
+                pass
+        
+        # Check for folders in Excel that are now empty (issue)
+        if folder_in_excel and not os.listdir(folder_path):
+            log_error(f"P7: Empty folder {folder_name} listed in main Excel.")
+            issues_found += 1
+    
+    missing_count = len(df[df["ISO Status"] == "MISSING"])
+    ok_count = len(df[df["ISO Status"] == "OK"])
+    
+    report = f"""
+================================================================================
+                        FINAL VERIFICATION REPORT
+================================================================================
+Total ISOs processed: {len(df)}
+ISOs OK: {ok_count}
+ISOs MISSING: {missing_count}
+Issues Found (e.g., empty folders in main Excel): {issues_found}
 
+Excel file: {excel_file}
+Destination: {dest_root}
+
+All errors logged in: {ERROR_REPORT}
+================================================================================
+"""
+    
+    print(report)
+    log_msg(report)
+    
+    elapsed = time.time() - process_start
+    log_msg(f"=== P7: FINAL CLEANUP + ERROR CHECK END ({format_time(elapsed)}) ===\n")
+    
+    return missing_count, issues_found
+
+# ============================================================================
+# MAIN ORCHESTRATOR
+# ============================================================================
 def main():
-    log_msg("Starting Master Orchestrator Workflow (v3.1)...")
+    master_start = time.time()
     
-    # 1. Select Primary Paths via GUI
+    # Initialize logs
+    with open(LOG_FILE, "w", encoding="utf-8") as f:
+        f.write("=== ORCHESTRATOR LOG ===\n\n")
+    with open(ERROR_REPORT, "w", encoding="utf-8") as f:
+        f.write("=== ERROR REPORT ===\n\n")
     
-    # Path 1: Input Excel (the task list)
-    excel_file = select_file("1. Select Input Excel (must be saved first)", [("Excel files", "*.xlsx")])
-    if not excel_file: 
-        log_msg("Workflow aborted: Input Excel not selected.")
-        return
+    log_msg("Starting Complete Orchestrator...\n")
     
-    # Path 2: ISO Server (source documents)
-    server_path = select_folder("2. Select ISO Server Root Folder")
-    if not server_path: 
-        log_msg("Workflow aborted: ISO Server path not selected.")
-        return
-
-    # Path 3: Master Index File (New requirement)
-    index_file_path = select_file("3. Select Master Index File (text file with ISO/Page mapping)", [("Text files", "*.txt"), ("All files", "*.*")])
-    if not index_file_path: 
-        log_msg("Workflow aborted: Master Index File not selected.")
-        return
-
-    # Path 4: Master PDF (source for extracted pages)
-    master_pdf = select_file("4. Select Master PDF Document", [("PDF files", "*.pdf")])
-    if not master_pdf: 
-        log_msg("Workflow aborted: Master PDF not selected.")
-        return
-    
-    # Path 5: Destination Root Folder (where all work will be done)
-    dest_root = select_folder("5. Select Destination Root Folder")
-    if not dest_root: 
-        log_msg("Workflow aborted: Destination Root Folder not selected.")
-        return
-    
-    log_msg(f"Paths selected:\n  Excel: {excel_file}\n  Server: {server_path}\n  Index: {index_file_path}\n  Master PDF: {master_pdf}\n  Destination: {dest_root}")
-
-    # Run Pre-flight Check (Excel validation and structure update)
-    log_msg("Running Pre-flight Check (Excel validation)...")
+    # The primary Excel mapping loop/system to ISO.
+    excel_file = os.path.join(os.getcwd(), "loop_system_iso.xlsx")
+    excel_dir = os.path.dirname(excel_file)
     if not create_or_update_excel(excel_file):
-        # Function prints a message and shows a Tkinter box if file is missing/created.
-        log_msg("Pre-flight check failed. Please fill the Excel and re-run.")
+        return
+    
+    print("\n" + "="*80)
+    print("SELECT REQUIRED FOLDERS AND FILES (7 PROCESS WORKFLOW):")
+    print("="*80)
+    
+    # --- USER INPUT SELECTIONS ---
+    print("FOLDER 1: Select the master repository for original ISOs.")
+    server_path = select_folder("FOLDER 1: Server ISO Folder (Source for P1)")
+    if not server_path:
+        log_msg("Workflow cancelled: Server ISO Folder not selected.")
+        return
+    
+    print("FOLDER 2: Select the root destination for ALL generated folders/files.")
+    dest_root = select_folder("FOLDER 2: Destination Root (Workspace)")
+    if not dest_root:
+        log_msg("Workflow cancelled: Destination Root not selected.")
+        return
+    
+    print("FOLDER 3: Select the LINEWISE archive folder (Source for P4/FRI copies).")
+    linewise_path = select_folder("FOLDER 3: LINEWISE Folder (Source for P4)")
+    if not linewise_path:
+        log_msg("Workflow cancelled: LINEWISE Folder not selected.")
+        return
+    
+    print("FILE 4: Select the MASTER PDF file (Source document for page extraction in P3).")
+    pdf_path = select_file("FILE 4: Master PDF (Source for P3)", [("PDF files", "*.pdf")])
+    if not pdf_path:
+        log_msg("Workflow cancelled: Master PDF not selected.")
+        return
+        
+    print("**FILE 5: Select the PRE-GENERATED PDF INDEX (.txt file) for user reference.**")
+    pdf_index_txt = select_file("FILE 5: PDF Index (.txt) Reference", [("Text files", "*.txt"), ("All files", "*.*")])
+    if not pdf_index_txt:
+        log_msg("Workflow cancelled: PDF Index (.txt) Reference not selected.")
+        return
+    
+    print("**FILE 6: Select the MASTER PAGE INDEX EXCEL file (ISO to Page Number map for P3).**")
+    page_index_excel = select_file("FILE 6: Master Page Index Excel (ISO to Page Number map for P3)", [("Excel files", "*.xlsx")])
+    if not page_index_excel:
+        log_msg("Workflow cancelled: Master Page Index Excel not selected.")
+        return
+        
+    # --- Step 1: Copy the .txt index file to the working directory for user convenience ---
+    try:
+        shutil.copy2(pdf_index_txt, os.path.join(excel_dir, PDF_INDEX_REFERENCE_NAME))
+        log_msg(f"Copied PDF Index Reference to: {os.path.join(excel_dir, PDF_INDEX_REFERENCE_NAME)}")
+        messagebox.showinfo("Index Reference Ready", 
+                            f"The PDF Index Reference has been copied to the script folder ({PDF_INDEX_REFERENCE_NAME}).\n\n"
+                            f"Please ensure the Master Page Index Excel ({os.path.basename(page_index_excel)}) has been fully updated "
+                            f"with page numbers from this reference *before* proceeding.")
+    except Exception as e:
+        log_msg(f"ERROR copying PDF Index Reference: {e}")
+        messagebox.showerror("Error", f"Failed to copy PDF Index Reference. Please check permissions. Workflow cancelled.")
         return
 
-    # 2. Execute Processes P1-P7
+    summary = f"""
+P1: ISO Manager (Source: {os.path.basename(server_path)})
+P2: Generate Excel (Workspace: {os.path.basename(dest_root)})
+P3: Extract Pages (Source PDF: {os.path.basename(pdf_path)})
+    - Uses Page Index: {os.path.basename(page_index_excel)}
+    - Reference File: {PDF_INDEX_REFERENCE_NAME} (copied to script folder)
+P4: Fricopy (Source: {os.path.basename(linewise_path)})
+P5: Cleanup Redundancy
+P6: Combine PDF (Custom Sorted & Cached)
+P7: Final Cleanup + Verify
+"""
+    print(summary)
     
+    if not messagebox.askyesno("Confirm", "Run complete 7-process workflow?"):
+        return
+    
+    # --- EXECUTE WORKFLOW ---
     try:
-        # P1: ISO Manager - Creates folders, renames old ones, copies source ISOs
         iso_manager(excel_file, server_path, dest_root)
+        generate_excel(dest_root)
         
-        # P2: Generate Excel - Reads Index File, creates local output.xlsx with page numbers
-        generate_excel(dest_root, index_file_path)
+        # P3: Extraction based on external ISO-Page mapping
+        extract_pages(dest_root, pdf_path, page_index_excel)
         
-        # P3: Extract Pages - Uses output.xlsx to extract pages from Master PDF
-        extract_pages(dest_root, master_pdf)
+        # P4: Copy FRI documents
+        fricopy(dest_root, linewise_path)
         
-        # P4: FRI Copies - Creates backup copies of all main PDFs with _FRI suffix
-        fri_copies(dest_root)
+        # P5: Delete unnecessary files
+        cleanup_redundancy(dest_root, excel_file)
         
-        # P5: Cleanup Redundancy - Deletes unneeded original ISO files
-        cleanup_redundancy(dest_root)
+        # P6: Combine PDFs with custom sorting and caching
+        combine_pdfs(dest_root) 
         
-        # P6: Combine PDFs - Merges all remaining PDFs into Combined.pdf
-        combine_pdfs(dest_root)
+        # P7: Final checks
+        missing, issues = final_cleanup_and_verify(dest_root, excel_file)
         
-        # P7: Final Cleanup & Verification - Final status update and highlight
-        final_cleanup(dest_root)
+        total_elapsed = time.time() - master_start
         
-        log_msg("--- ✅ Workflow Complete Successfully ---")
-        messagebox.showinfo("Success", "Master Orchestrator Workflow Completed Successfully. Check orchestrator_log.txt for details.")
+        result = f"""
+================================================================================
+COMPLETE WORKFLOW FINISHED
+================================================================================
+Total Time: {format_time(total_elapsed)}
+Missing ISOs: {missing}
+Issues Found: {issues}
 
+Logs:
+- Main: {LOG_FILE}
+- Errors: {ERROR_REPORT}
+================================================================================
+"""
+        print(result)
+        messagebox.showinfo("Success", result)
     except Exception as e:
-        log_msg(f"--- ❌ FATAL ERROR IN WORKFLOW EXECUTION ---: {e}")
-        log_error(f"FATAL ERROR: {e}")
-        messagebox.showerror("Error", f"A fatal error occurred: {e}. Check error_report.txt for details.")
-
+        log_msg(f"FATAL ERROR in main execution: {e}")
+        log_error(f"FATAL: {e}")
+        messagebox.showerror("Error", f"Failed: {e}\n\nCheck error report.")
 
 if __name__ == "__main__":
     main()
-
